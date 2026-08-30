@@ -1,0 +1,63 @@
+diff --git a/starter/agent.py b/starter/agent.py
+index 28431bd..4bdbe08 100644
+--- a/starter/agent.py
++++ b/starter/agent.py
+@@ -74,7 +74,10 @@ def classify(text: str) -> str:
+ 
+ 
+ class SessionState:
+-    __slots__ = ("category", "slots", "asked", "exhausted", "profile_terms", "last_turn_asked")
++    __slots__ = (
++        "category", "slots", "asked", "exhausted", "profile_terms", "last_turn_asked",
++        "override_source_attr", "override_source_value",
++    )
+ 
+     def __init__(self, profile_terms: str) -> None:
+         self.category = ""
+@@ -83,6 +86,11 @@ class SessionState:
+         self.exhausted: set[str] = set()
+         self.profile_terms = profile_terms
+         self.last_turn_asked: str | None = None
++        # Provenance for the one preference an Intent Override turn may later
++        # supersede: which bucket it was filed under, and its exact value at
++        # the time it was recorded.
++        self.override_source_attr: str | None = None
++        self.override_source_value: str | None = None
+ 
+ 
+ class Agent:
+@@ -154,15 +162,32 @@ class Agent:
+                 state.category = category.strip()
+                 remainder = remainder.rstrip(".").strip()
+                 if remainder:
+-                    state.slots[classify(remainder)] = remainder
++                    attr = classify(remainder)
++                    state.slots[attr] = remainder
++                    # Remember this as the preference a later override may
++                    # supersede -- both which bucket it landed in and its
++                    # exact value, so we can tell it apart from anything
++                    # else that bucket picks up before the override arrives.
++                    state.override_source_attr = attr
++                    state.override_source_value = remainder
+             return
+ 
+         # Explicit intent override mid-conversation.
+         if text.startswith("Actually, ignore my earlier preference. What I need is: "):
+             new_value = text[len("Actually, ignore my earlier preference. What I need is: "):].rstrip(".").strip()
++            if state.override_source_attr is not None:
++                source_attr = state.override_source_attr
++                source_value = state.override_source_value
++                # Only remove the superseded preference if it still occupies
++                # its original slot unchanged -- if something else already
++                # overwrote that slot, this provenance no longer applies and
++                # we must not delete the newer value blindly.
++                if state.slots.get(source_attr) == source_value:
++                    del state.slots[source_attr]
++                state.override_source_attr = None
++                state.override_source_value = None
+             if new_value:
+                 attr = classify(new_value)
+-                # Drop any stale value under the same bucket, then set the new one.
+                 state.slots[attr] = new_value
+             return
+ 

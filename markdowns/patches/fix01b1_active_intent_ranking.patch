@@ -1,0 +1,54 @@
+diff --git a/starter/agent.py b/starter/agent.py
+index ce97ec1..ccbc1ef 100644
+--- a/starter/agent.py
++++ b/starter/agent.py
+@@ -252,6 +252,17 @@ class Agent:
+         unique_terms = list(dict.fromkeys(_terms(combined)))[:40]
+         return " OR ".join(f'"{term}"' for term in unique_terms)
+ 
++    def _active_expression(self, state: SessionState) -> str:
++        # FIX-01B1: active-intent-only query, built the same way as
++        # _build_query() but from state.active_slots alone (never state.slots,
++        # state.category, or state.profile_terms) so historical-only terms in
++        # slots - active_slots get no ranking preference. Used only to
++        # classify already-retrieved candidates, never to change the
++        # candidate set itself.
++        combined = " ".join(state.active_slots.values())
++        unique_terms = list(dict.fromkeys(_terms(combined)))[:40]
++        return " OR ".join(f'"{term}"' for term in unique_terms)
++
+     def _next_ask_attribute(self, state: SessionState) -> str | None:
+         for attr in ASK_ORDER:
+             if attr in state.active_slots:
+@@ -278,7 +289,30 @@ class Agent:
+                 "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
+                 (expression, top_k),
+             ).fetchall()
+-            recommendations = [{"parent_asin": str(row[0])} for row in rows]
++            candidate_asins = [str(row[0]) for row in rows]
++
++            # FIX-01B1: active-intent-aware ranking preference. Candidate
++            # generation above (expression/ORDER BY/LIMIT) is untouched. This
++            # only reorders the already-fixed candidate set: candidates whose
++            # indexed text matches current active intent are stably moved
++            # ahead of the rest, preserving original BM25 order within each
++            # group. No blending weight -- a pure stable partition, so there
++            # is nothing to tune post-hoc.
++            active_expression = self._active_expression(state)
++            if active_expression and candidate_asins:
++                placeholders = ",".join("?" for _ in candidate_asins)
++                active_matches = {
++                    str(row[0])
++                    for row in self.connection.execute(
++                        f"SELECT parent_asin FROM products WHERE products MATCH ? "
++                        f"AND parent_asin IN ({placeholders})",
++                        (active_expression, *candidate_asins),
++                    ).fetchall()
++                }
++                if active_matches:
++                    candidate_asins.sort(key=lambda asin: asin not in active_matches)
++
++            recommendations = [{"parent_asin": asin} for asin in candidate_asins]
+ 
+         ask_attribute: str | None = None
+         message = "Here are the closest matches I found so far."
