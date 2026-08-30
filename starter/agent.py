@@ -260,6 +260,21 @@ class Agent:
         combined = " ".join(state.active_slots.values())
         return list(dict.fromkeys(_terms(combined)))[:40]
 
+    def _matchable_slots(self, state: SessionState) -> list[list[str]]:
+        # FIX-02A2: per active_slots KEY (not flattened across slots), that
+        # slot's own tokenized terms -- same tokenizer as _active_terms(). A
+        # slot is "matchable" if it has >=1 usable term. Every slot term here
+        # is also a member of _active_terms(state)'s flattened, deduped list
+        # (same source strings, same tokenizer), so slot satisfaction can be
+        # derived from the term_matches already computed for active-term
+        # coverage in respond() -- no additional FTS queries.
+        matchable: list[list[str]] = []
+        for value in state.active_slots.values():
+            terms = list(dict.fromkeys(_terms(value)))
+            if terms:
+                matchable.append(terms)
+        return matchable
+
     def _next_ask_attribute(self, state: SessionState) -> str | None:
         for attr in ASK_ORDER:
             if attr in state.active_slots:
@@ -319,7 +334,31 @@ class Agent:
                     matched = sum(1 for term in active_terms if asin in term_matches[term])
                     return matched / len(active_terms)
 
-                candidate_asins.sort(key=lambda asin: (-_coverage(asin), baseline_index[asin]))
+                # FIX-02A2: active-slot-coverage secondary tie-break, used
+                # only to separate candidates that already have equal
+                # active-term coverage (term coverage above remains the sole
+                # primary key -- this can never promote a lower-term-coverage
+                # candidate above a higher one). Reuses term_matches computed
+                # above -- no new FTS queries. A slot counts as satisfied for
+                # a candidate if it matches >=1 of that slot's own terms (not
+                # all); score is satisfied/matchable slots, no weights, no
+                # threshold. With zero matchable slots this is 0.0 for every
+                # candidate -- a no-op that falls through to the unchanged
+                # baseline-BM25-order final tiebreak, identical to B2.
+                matchable_slots = self._matchable_slots(state)
+
+                def _slot_coverage(asin: str) -> float:
+                    if not matchable_slots:
+                        return 0.0
+                    satisfied = sum(
+                        1 for slot_terms in matchable_slots
+                        if any(asin in term_matches.get(term, ()) for term in slot_terms)
+                    )
+                    return satisfied / len(matchable_slots)
+
+                candidate_asins.sort(
+                    key=lambda asin: (-_coverage(asin), -_slot_coverage(asin), baseline_index[asin])
+                )
 
             recommendations = [{"parent_asin": asin} for asin in candidate_asins[:top_k]]
 
