@@ -187,6 +187,7 @@ class Agent:
         # Explicit intent override mid-conversation.
         if text.startswith("Actually, ignore my earlier preference. What I need is: "):
             new_value = text[len("Actually, ignore my earlier preference. What I need is: "):].rstrip(".").strip()
+            tracked_source_attr = state.override_source_attr
             if state.override_source_attr is not None:
                 source_attr = state.override_source_attr
                 source_value = state.override_source_value
@@ -205,8 +206,19 @@ class Agent:
                 # Retrieval evidence: unchanged baseline behaviour -- just
                 # overwrite this bucket, same as before the FIX-01 work.
                 state.slots[attr] = new_value
-                # Active intent: the new preference is now active.
-                state.active_slots[attr] = new_value
+                # FIX-03A: the override message ("ignore my earlier
+                # preference") only ever refers to ONE prior preference --
+                # the tracked source_attr/source_value handled above. If the
+                # new value lands in a DIFFERENT bucket that already holds a
+                # value, that value was never named as superseded by this
+                # message and must not be silently destroyed -- merge
+                # instead of overwrite. If the bucket is empty, or is the
+                # tracked source bucket itself, behavior is unchanged from
+                # prior production.
+                if attr in state.active_slots and attr != tracked_source_attr:
+                    state.active_slots[attr] = state.active_slots[attr] + "; " + new_value
+                else:
+                    state.active_slots[attr] = new_value
             return
 
         # Direct answer to our clarification question.
