@@ -91,7 +91,12 @@ def main() -> None:
         if response.get("ask_attribute"):
             print(f"       (asking about: {response['ask_attribute']})")
         print("   Top matches:")
-        print_recommendations(response.get("recommendations", []), titles)
+        # Show fewer, more targeted titles the more the agent has learned
+        # about this customer -- purely a display choice (doesn't affect
+        # the actual search results or scoring, just how many we print).
+        known = agent.known_slot_count(session_id)
+        display_limit = max(3, 9 - 2 * known)
+        print_recommendations(response.get("recommendations", []), titles, limit=display_limit)
         print()
 
         turn += 1
