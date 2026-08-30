@@ -18,7 +18,7 @@ ASK_ORDER = ["material", "color", "budget", "style", "use_case", "size", "featur
 
 MATERIAL_RE = re.compile(r"\b(cotton|polyester|nylon|leather|wool|spandex|silk|rayon|fabric|suede|denim)\b", re.I)
 COLOR_RE = re.compile(r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange|navy)\b", re.I)
-BUDGET_RE = re.compile(r"(\$\s?\d+|\bunder\b|\bbudget\b|\bcheap\b|\baffordable\b|\baround\s+\d+|\bnear\s+\d+|\b\d+\s*dollars?\b)", re.I)
+BUDGET_RE = re.compile(r"(\$\s?\d+|\bunder\b|\bbudget\b|\bcheap\b|\baffordable\b)", re.I)
 SIZE_WORDS = ("size", "sizing", "width", "wide", "narrow", "small", "medium", "large", "xl", "xxl")
 STYLE_WORDS = ("style", "fit", "sleeve", "neck", "casual", "formal", "department", "breasted")
 USE_CASE_WORDS = ("hiking", "running", "gym", "winter", "outdoor", "work", "travel", "beach", "wedding", "party", "yoga", "formal wear")
@@ -31,9 +31,7 @@ NO_PREFERENCE_PHRASES = {
     "anything", "any", "whatever", "idk", "i dont know", "i don't know",
     "dont know", "don't know", "no preference", "not sure", "none",
     "doesnt matter", "doesn't matter", "does not matter", "no idea",
-    "not really", "nothing specific", "no", "nope", "nah", "naw",
-    "skip", "pass", "na", "n a", "meh", "not particular", "no particular",
-    "not fussy", "im flexible", "i'm flexible", "flexible", "open to anything",
+    "not really", "nothing specific", "no",
 }
 
 
@@ -127,15 +125,6 @@ class Agent:
             cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
         self.connection.commit()
 
-    def known_slot_count(self, session_id: str) -> int:
-        """Read-only helper: how many attribute slots are currently filled
-        for this session. NOT used by the scored evaluator (which only
-        calls reset()/respond()) -- purely for display purposes, e.g. the
-        interactive demo narrowing how many titles it prints as it learns
-        more about what the customer wants."""
-        state = self._sessions.get(session_id)
-        return len(state.slots) if state else 0
-
     def reset(self, session_id: str, user_profile: dict) -> None:
         tags = user_profile.get("preference_tags") or []
         profile_terms = " ".join(str(tag) for tag in tags)
@@ -214,16 +203,6 @@ class Agent:
     def _build_query(self, state: SessionState) -> str:
         pieces = [state.category, state.profile_terms, *state.slots.values()]
         combined = " ".join(p for p in pieces if p)
-        # Note: we tried excluding pure-number tokens here (to avoid the
-        # "budget: around 150" case matching an unrelated product that
-        # happens to contain "150" in its title). Measured on the real
-        # 200-session set, this actively HURT hit rate (0.73 -> 0.675),
-        # because many of the evaluator's own constraint phrases embed a
-        # digit taken directly from the true target product's own listing
-        # text (e.g. "budget around $49.99"), so numeric tokens are often
-        # genuine, working signal, not noise. Kept as plain full-text
-        # matching -- the occasional false-positive collision from a vague
-        # live-typed number is a smaller cost than losing that signal.
         unique_terms = list(dict.fromkeys(_terms(combined)))[:40]
         return " OR ".join(f'"{term}"' for term in unique_terms)
 
