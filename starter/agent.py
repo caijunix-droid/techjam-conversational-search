@@ -74,15 +74,32 @@ def classify(text: str) -> str:
 
 
 class SessionState:
-    __slots__ = ("category", "slots", "asked", "exhausted", "profile_terms", "last_turn_asked")
+    __slots__ = (
+        "category", "slots", "active_slots", "asked", "exhausted", "profile_terms",
+        "last_turn_asked", "override_source_attr", "override_source_value",
+    )
 
     def __init__(self, profile_terms: str) -> None:
         self.category = ""
+        # Retrieval evidence: lexical terms accumulated from the conversation.
+        # Feeds _build_query() and is intentionally left byte-equivalent to
+        # the accepted baseline's accumulation behaviour, override included.
         self.slots: dict[str, str] = {}
+        # Active intent: what the customer currently wants. Feeds dialog
+        # logic (_next_ask_attribute). Kept separate from `slots` so that
+        # correctly removing a superseded preference from active intent does
+        # not also remove it as retrieval evidence.
+        self.active_slots: dict[str, str] = {}
         self.asked: set[str] = set()
         self.exhausted: set[str] = set()
         self.profile_terms = profile_terms
         self.last_turn_asked: str | None = None
+        # Provenance for the one active preference an Intent Override turn
+        # may later supersede: which bucket it was filed under, and its
+        # exact value at the time it was recorded. Scoped to active_slots
+        # only -- retrieval evidence never uses this.
+        self.override_source_attr: str | None = None
+        self.override_source_value: str | None = None
 
 
 class Agent:
@@ -147,23 +164,49 @@ class Agent:
                 state.category = category.strip()
                 constraint = constraint.rstrip(".").strip()
                 if constraint:
-                    state.slots[classify(constraint)] = constraint
+                    attr = classify(constraint)
+                    state.slots[attr] = constraint
+                    state.active_slots[attr] = constraint
             else:
                 # intent_override opener: "{category}. {old_value}"
                 category, _, remainder = rest.partition(". ")
                 state.category = category.strip()
                 remainder = remainder.rstrip(".").strip()
                 if remainder:
-                    state.slots[classify(remainder)] = remainder
+                    attr = classify(remainder)
+                    state.slots[attr] = remainder
+                    state.active_slots[attr] = remainder
+                    # Remember this as the active preference a later override
+                    # may supersede. Retrieval evidence (`slots`) is
+                    # intentionally left out of this bookkeeping so it keeps
+                    # accumulating exactly like the accepted baseline.
+                    state.override_source_attr = attr
+                    state.override_source_value = remainder
             return
 
         # Explicit intent override mid-conversation.
         if text.startswith("Actually, ignore my earlier preference. What I need is: "):
             new_value = text[len("Actually, ignore my earlier preference. What I need is: "):].rstrip(".").strip()
+            if state.override_source_attr is not None:
+                source_attr = state.override_source_attr
+                source_value = state.override_source_value
+                # Only remove the superseded preference from ACTIVE intent if
+                # it still occupies its original slot unchanged -- if
+                # something else already overwrote that slot, this
+                # provenance no longer applies and we must not delete the
+                # newer value blindly. Retrieval evidence (`slots`) is not
+                # touched by this check at all.
+                if state.active_slots.get(source_attr) == source_value:
+                    del state.active_slots[source_attr]
+                state.override_source_attr = None
+                state.override_source_value = None
             if new_value:
                 attr = classify(new_value)
-                # Drop any stale value under the same bucket, then set the new one.
+                # Retrieval evidence: unchanged baseline behaviour -- just
+                # overwrite this bucket, same as before the FIX-01 work.
                 state.slots[attr] = new_value
+                # Active intent: the new preference is now active.
+                state.active_slots[attr] = new_value
             return
 
         # Direct answer to our clarification question.
@@ -172,7 +215,9 @@ class Agent:
             for part in body.split("; "):
                 part = part.strip()
                 if part:
-                    state.slots[classify(part)] = part
+                    attr = classify(part)
+                    state.slots[attr] = part
+                    state.active_slots[attr] = part
             return
 
         # "No preference" responses (boundary case, or attribute exhausted).
@@ -199,6 +244,7 @@ class Agent:
         attr = classify(text)
         if text:
             state.slots[attr] = text
+            state.active_slots[attr] = text
 
     def _build_query(self, state: SessionState) -> str:
         pieces = [state.category, state.profile_terms, *state.slots.values()]
@@ -208,7 +254,7 @@ class Agent:
 
     def _next_ask_attribute(self, state: SessionState) -> str | None:
         for attr in ASK_ORDER:
-            if attr in state.slots:
+            if attr in state.active_slots:
                 continue
             if attr in state.exhausted:
                 continue
