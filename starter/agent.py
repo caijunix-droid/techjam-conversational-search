@@ -252,6 +252,14 @@ class Agent:
         unique_terms = list(dict.fromkeys(_terms(combined)))[:40]
         return " OR ".join(f'"{term}"' for term in unique_terms)
 
+    def _active_terms(self, state: SessionState) -> list[str]:
+        # FIX-01B2: distinct active-intent terms only, from state.active_slots
+        # alone (never state.slots/category/profile_terms) -- same tokenizer
+        # as _build_query(). Used only to reorder an already-fixed candidate
+        # pool, never to change candidate generation itself.
+        combined = " ".join(state.active_slots.values())
+        return list(dict.fromkeys(_terms(combined)))[:40]
+
     def _next_ask_attribute(self, state: SessionState) -> str | None:
         for attr in ASK_ORDER:
             if attr in state.active_slots:
@@ -273,12 +281,47 @@ class Agent:
         if not expression:
             recommendations: list[dict] = []
         else:
+            # FIX-01B2: candidate generation query is unchanged (same
+            # expression/ORDER BY/field weights); only the retrieval depth is
+            # widened so a second-stage ranker has more than top_k candidates
+            # to reorder within. Never narrower than the caller's requested
+            # top_k, so the external top_k contract is preserved regardless.
+            internal_depth = max(50, top_k)
             rows = self.connection.execute(
                 "SELECT parent_asin FROM products WHERE products MATCH ? "
                 "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-                (expression, top_k),
+                (expression, internal_depth),
             ).fetchall()
-            recommendations = [{"parent_asin": str(row[0])} for row in rows]
+            candidate_asins = [str(row[0]) for row in rows]
+
+            # FIX-01B2: active-term-coverage second-stage ranking. Candidate
+            # generation above is untouched; this only reorders the
+            # already-fixed candidate pool. Each candidate's score is the
+            # fraction of distinct active-intent terms it matches (no
+            # weights, no threshold); ties (including "no active terms at
+            # all", where every candidate scores 0/0 -> treated as equal)
+            # keep the original BM25 order.
+            active_terms = self._active_terms(state)
+            if active_terms and candidate_asins:
+                placeholders = ",".join("?" for _ in candidate_asins)
+                term_matches: dict[str, set[str]] = {}
+                for term in active_terms:
+                    term_expr = f'"{term}"'
+                    term_rows = self.connection.execute(
+                        f"SELECT parent_asin FROM products WHERE products MATCH ? "
+                        f"AND parent_asin IN ({placeholders})",
+                        (term_expr, *candidate_asins),
+                    ).fetchall()
+                    term_matches[term] = {str(r[0]) for r in term_rows}
+                baseline_index = {asin: i for i, asin in enumerate(candidate_asins)}
+
+                def _coverage(asin: str) -> float:
+                    matched = sum(1 for term in active_terms if asin in term_matches[term])
+                    return matched / len(active_terms)
+
+                candidate_asins.sort(key=lambda asin: (-_coverage(asin), baseline_index[asin]))
+
+            recommendations = [{"parent_asin": asin} for asin in candidate_asins[:top_k]]
 
         ask_attribute: str | None = None
         message = "Here are the closest matches I found so far."
