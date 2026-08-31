@@ -138,10 +138,14 @@ class Fix03ATest(unittest.TestCase):
                     [r["parent_asin"] for r in a2_response["recommendations"]],
                 )
 
-    # E. The correction touches only active_slots; retrieval evidence
-    # (`slots`) keeps its unconditional-overwrite behavior, unchanged --
-    # the B0/B2 active_slots-vs-slots separation is not reopened.
-    def test_e_retrieval_evidence_unaffected(self) -> None:
+    # E. FIX-03A's own scope: this test file pins active_slots behavior at
+    # the FIX-03A commit only. FIX-04A (a later, separately authorized
+    # change -- see test_fix04a_slots_preservation.py) intentionally
+    # extends the same merge rule to retrieval evidence (`slots`), so this
+    # test no longer pins slots to unconditional-overwrite; it pins the
+    # feature bucket, which this scenario never touches on override, to
+    # confirm the merge is scoped to the actually-overridden bucket only.
+    def test_e_retrieval_evidence_untouched_buckets_unaffected(self) -> None:
         session_id = "case_e"
         messages = [
             "I'm looking for Shoes. Pull On closure",
@@ -150,9 +154,8 @@ class Fix03ATest(unittest.TestCase):
         ]
         self._replay(self.patched, session_id, messages)
         state = self.patched._sessions[session_id]
-        # Retrieval evidence still just overwrites the bucket -- no merge --
-        # identical to prior production semantics for `slots`.
-        self.assertEqual(state.slots.get("material"), "cotton")
+        # The feature bucket (tracked source, never targeted by this
+        # override's classified attr) is untouched, exactly as before.
         self.assertEqual(state.slots.get("feature"), "Pull On closure")
 
     # F. Existing override-related tests remain green (run separately via

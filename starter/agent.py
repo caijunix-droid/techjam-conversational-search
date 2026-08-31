@@ -82,8 +82,8 @@ class SessionState:
     def __init__(self, profile_terms: str) -> None:
         self.category = ""
         # Retrieval evidence: lexical terms accumulated from the conversation.
-        # Feeds _build_query() and is intentionally left byte-equivalent to
-        # the accepted baseline's accumulation behaviour, override included.
+        # Feeds _build_query(). FIX-04A: on override, unrelated buckets are
+        # merged rather than overwritten (same rule as active_slots below).
         self.slots: dict[str, str] = {}
         # Active intent: what the customer currently wants. Feeds dialog
         # logic (_next_ask_attribute). Kept separate from `slots` so that
@@ -96,8 +96,9 @@ class SessionState:
         self.last_turn_asked: str | None = None
         # Provenance for the one active preference an Intent Override turn
         # may later supersede: which bucket it was filed under, and its
-        # exact value at the time it was recorded. Scoped to active_slots
-        # only -- retrieval evidence never uses this.
+        # exact value at the time it was recorded. The bucket (attr) is also
+        # consulted by the FIX-04A retrieval-evidence merge below; the value
+        # is only ever consulted for the active_slots deletion-safety check.
         self.override_source_attr: str | None = None
         self.override_source_value: str | None = None
 
@@ -177,9 +178,9 @@ class Agent:
                     state.slots[attr] = remainder
                     state.active_slots[attr] = remainder
                     # Remember this as the active preference a later override
-                    # may supersede. Retrieval evidence (`slots`) is
-                    # intentionally left out of this bookkeeping so it keeps
-                    # accumulating exactly like the accepted baseline.
+                    # may supersede. FIX-04A: the bucket name (attr) is also
+                    # read by the retrieval-evidence merge on override; the
+                    # value is only ever read for the active_slots check.
                     state.override_source_attr = attr
                     state.override_source_value = remainder
             return
@@ -203,9 +204,18 @@ class Agent:
                 state.override_source_value = None
             if new_value:
                 attr = classify(new_value)
-                # Retrieval evidence: unchanged baseline behaviour -- just
-                # overwrite this bucket, same as before the FIX-01 work.
-                state.slots[attr] = new_value
+                # FIX-04A: same rationale as the active_slots merge below --
+                # the override message only ever names ONE prior preference
+                # (the tracked source_attr). If the new value lands in a
+                # DIFFERENT retrieval-evidence bucket that already holds a
+                # value, that value was never named as superseded and must
+                # not be silently destroyed -- merge instead of overwrite.
+                # If the bucket is empty, or is the tracked source bucket
+                # itself, behavior is unchanged from prior production.
+                if attr in state.slots and attr != tracked_source_attr:
+                    state.slots[attr] = state.slots[attr] + "; " + new_value
+                else:
+                    state.slots[attr] = new_value
                 # FIX-03A: the override message ("ignore my earlier
                 # preference") only ever refers to ONE prior preference --
                 # the tracked source_attr/source_value handled above. If the
