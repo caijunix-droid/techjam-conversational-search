@@ -440,35 +440,45 @@ We present these as feasibility advantages, not as evidence of production-scale 
 
 ## Team Contributions
 
-The project was developed collaboratively, with responsibilities changing between the initial working system and the final optimization/submission phase.
+CartChatter was developed collaboratively, with Junjie and Samuel contributing across different stages of the project — from building the initial conversational agent and live demonstration experience to the later evaluation, optimization, verification, and submission process.
 
-### Teammate — initial agent foundation, conversational robustness and demo
+### Junjie — Agent Foundation, Conversational Experience and Live Demo
 
-Based on the project handover, the teammate's main contributions were:
+Junjie focused on building the foundation that made CartChatter a usable multi-turn shopping agent rather than a simple one-shot search system.
 
-- built and tested the initial working multi-turn shopping agent that established the team's early **73.0% HR@10** milestone;
-- implemented the foundational dialog-memory behaviour and proactive clarification flow;
-- developed template-aware parsing and fallback handling for free-form or vague user responses;
-- built the interactive live demo in `demo/interactive.py`;
-- contributed later parsing/demo robustness improvements, including broader budget/style/no-preference/filler handling and safer fallback state updates;
-- performed early evaluator experiments and documented the initial technical handover for the remainder of the project.
+His contributions included:
 
-### Sam — evaluation strategy, final optimization direction, governance and submission
+- developing and testing the team's initial working multi-turn agent, which established the **73.0% HR@10** working milestone that became the foundation for subsequent optimization;
+- implementing the early conversational-memory behaviour that allowed the agent to retain useful information across turns;
+- building the proactive clarification flow so the agent could progressively gather information such as material, color, size, style, budget and use case instead of relying only on the shopper's first message;
+- developing template-aware message parsing and fallback handling for less structured inputs, including vague answers, `no preference` responses and free-form user messages;
+- building `demo/interactive.py`, giving judges and users a way to interact directly with the same underlying shopping agent outside the scripted evaluator;
+- improving the robustness and presentation of the live demo so unexpected or informal human input could be handled more gracefully during demonstration;
+- contributing later parsing, fallback and conversational-behaviour improvements alongside the scoring work;
+- carrying out early evaluator experiments and documenting the initial technical state so later development could continue from a reproducible baseline.
 
-Sam's primary role in the final development cycle was project control, evaluation strategy and technical decision-making rather than claiming every repository edit as personally authored code.
+These contributions established both the **core conversational experience** and the **demonstrable working product** that the later ranking and evaluation work built upon.
 
-Contributions included:
+### Samuel — Evaluation Strategy, Technical Direction and Final Optimization
 
-- reproduced key evaluator baselines and benchmark states locally;
-- established the evidence-first experiment workflow and go/no-go criteria used for final optimization;
-- directed the root-cause investigation of remaining misses, intent-override failures and ranking saturation;
-- coordinated and approved the progression from the team's **73.0% HR@10** working milestone to the final **88.0% HR@10** implementation;
-- required session-level regression reporting, targeted tests, simulation-to-production equivalence and rollback-safe Git checkpoints before accepting scoring changes;
-- coordinated concurrent teammate changes, merge/reconciliation decisions and the final scoring freeze;
-- led the final no-overfitting audit, repository hardening, reproducibility verification and submission-readiness process;
-- owned the final technical narrative, metric/limitation disclosures and README/Devpost preparation.
+Samuel focused on the evidence-driven development process used to evaluate, refine and ultimately freeze the final submission.
 
-This division is intentionally stated conservatively: implementation and command execution performed through development tooling are not presented as personal human coding where the project record only supports direction, review or approval.
+His contributions included:
+
+- reproducing and validating the key evaluator baselines and intermediate benchmark states used throughout development;
+- establishing the project's evidence-first optimization workflow, where proposed improvements were treated as hypotheses and required targeted analysis, testing, full evaluation and regression review before acceptance;
+- directing root-cause analysis across remaining retrieval misses, ranking failures, conversational intent overrides and saturated ranking signals;
+- coordinating the progression from the team's **73.0% HR@10** working milestone to the final **88.0% HR@10** result through successive evidence-backed improvements;
+- defining go/no-go criteria for experiments and rejecting changes when measured regressions outweighed their theoretical benefits;
+- requiring session-level regression analysis, targeted unit tests and simulation-to-production equivalence checks before final scoring changes were accepted;
+- coordinating concurrent repository changes, merge reconciliation and rollback-safe Git checkpoints during the final development sprint;
+- overseeing the final optimization audit, including the decision to stop further score tuning when no additional generalizable and sufficiently safe mechanism could be justified;
+- leading final reproducibility checks, repository hardening, scoring freeze and submission-readiness verification;
+- shaping the final technical narrative, performance disclosures, limitations and judge-facing documentation used for the GitHub and Devpost submission.
+
+Samuel's role therefore centered on **technical direction, evaluation discipline and final-system validation**, ensuring that improvements were supported by measured evidence rather than accepted simply because they appeared theoretically stronger.
+
+Together, the two workstreams complemented each other: Junjie established the conversational agent and live user experience, while Samuel drove the later evaluation, optimization and verification process that brought the system to its final submitted state.
 
 ---
 
