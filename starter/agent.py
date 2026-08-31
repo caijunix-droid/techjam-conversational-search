@@ -18,9 +18,9 @@ ASK_ORDER = ["material", "color", "budget", "style", "use_case", "size", "featur
 
 MATERIAL_RE = re.compile(r"\b(cotton|polyester|nylon|leather|wool|spandex|silk|rayon|fabric|suede|denim)\b", re.I)
 COLOR_RE = re.compile(r"\b(black|white|blue|red|pink|green|brown|gray|grey|purple|yellow|orange|navy)\b", re.I)
-BUDGET_RE = re.compile(r"(\$\s?\d+|\bunder\b|\bbudget\b|\bcheap\b|\baffordable\b)", re.I)
+BUDGET_RE = re.compile(r"(\$\s?\d+|\bunder\b|\bbudget\b|\bcheap\b|\baffordable\b|\baround\s+\d+|\babout\s+\d+|\bnear\s+\d+|\bless\s+than\b|\b\d+\s*dollars?\b|\b\d+\s*bucks?\b)", re.I)
 SIZE_WORDS = ("size", "sizing", "width", "wide", "narrow", "small", "medium", "large", "xl", "xxl")
-STYLE_WORDS = ("style", "fit", "sleeve", "neck", "casual", "formal", "department", "breasted")
+STYLE_WORDS = ("style", "fit", "sleeve", "neck", "casual", "formal", "department", "breasted", "men's", "mens", "women's", "womens", "boys", "girls", "unisex", "ladies", "kids", "toddler")
 USE_CASE_WORDS = ("hiking", "running", "gym", "winter", "outdoor", "work", "travel", "beach", "wedding", "party", "yoga", "formal wear")
 
 # Free-typed humans often answer clarifying questions vaguely rather than
@@ -31,7 +31,21 @@ NO_PREFERENCE_PHRASES = {
     "anything", "any", "whatever", "idk", "i dont know", "i don't know",
     "dont know", "don't know", "no preference", "not sure", "none",
     "doesnt matter", "doesn't matter", "does not matter", "no idea",
-    "not really", "nothing specific", "no",
+    "not really", "nothing specific", "no", "nope", "nah", "naw",
+    "skip", "pass", "na", "n a", "meh", "not particular", "no particular",
+    "not fussy", "im flexible", "i'm flexible", "flexible", "open to anything",
+}
+
+# Conversational filler with zero product information -- these carry no
+# signal about ANY attribute (unlike NO_PREFERENCE_PHRASES, which specifically
+# answers "no preference" to whatever was just asked). The agent should
+# simply ignore them rather than storing the literal words as a search term,
+# which would overwrite real, useful information with noise.
+FILLER_PHRASES = {
+    "thanks", "thank you", "thanks!", "ty", "thx", "ok", "okay", "k",
+    "cool", "nice", "great", "awesome", "perfect", "sounds good",
+    "appreciate it", "got it", "alright", "sure", "yep", "yes", "yeah",
+    "good", "fine",
 }
 
 
@@ -143,6 +157,15 @@ class Agent:
             cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
         self.connection.commit()
 
+    def known_slot_count(self, session_id: str) -> int:
+        """Read-only helper: how many attribute slots are currently active
+        for this session. NOT used by the scored evaluator (which only
+        calls reset()/respond()) -- purely for display purposes, e.g. the
+        interactive demo narrowing how many titles it prints as it learns
+        more about what the customer wants."""
+        state = self._sessions.get(session_id)
+        return len(state.active_slots) if state else 0
+
     def reset(self, session_id: str, user_profile: dict) -> None:
         tags = user_profile.get("preference_tags") or []
         profile_terms = " ".join(str(tag) for tag in tags)
@@ -252,10 +275,17 @@ class Agent:
         if text.startswith("Those options are not quite right yet"):
             return
 
+        stripped = re.sub(r"[^\w\s]", "", text).strip().lower()
+
+        # Pure conversational filler ("thanks", "ok", "cool") -- carries no
+        # product information about anything, so just ignore it entirely
+        # rather than letting it fall through and overwrite a real slot.
+        if stripped in FILLER_PHRASES:
+            return
+
         # Vague/non-committal answer to whatever we just asked -- treat as
         # "no preference" for that attribute rather than storing the vague
         # words as if they were a real constraint.
-        stripped = re.sub(r"[^\w\s]", "", text).strip().lower()
         if stripped in NO_PREFERENCE_PHRASES:
             if state.last_turn_asked:
                 state.exhausted.add(state.last_turn_asked)
@@ -263,10 +293,19 @@ class Agent:
 
         # Unknown format -- fall back to generic classification so we
         # still capture *something* rather than silently dropping it.
+        # IMPORTANT: append rather than overwrite. The generic "feature"
+        # bucket is a shared catch-all -- if we naively overwrote it, an
+        # early genuine message (e.g. the customer's very first "Socks")
+        # could get silently destroyed by a later throwaway reply landing
+        # in that same bucket (e.g. a stray "1" typed while trying to pick
+        # an item from a numbered list). Appending preserves everything.
         attr = classify(text)
         if text:
-            state.slots[attr] = text
-            state.active_slots[attr] = text
+            existing = state.slots.get(attr, "")
+            combined_value = f"{existing} {text}".strip() if existing else text
+            state.slots[attr] = combined_value
+            existing_active = state.active_slots.get(attr, "")
+            state.active_slots[attr] = f"{existing_active} {text}".strip() if existing_active else text
 
     def _build_query(self, state: SessionState) -> str:
         pieces = [state.category, state.profile_terms, *state.slots.values()]
