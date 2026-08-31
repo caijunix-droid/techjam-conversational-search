@@ -336,6 +336,19 @@ class Agent:
                 matchable.append(terms)
         return matchable
 
+    def _matchable_phrases(self, state: SessionState) -> list[str]:
+        # FIX-05: active slot values with >=2 usable tokens, as their
+        # COMPLETE normalized token sequence (order preserved, NOT deduped
+        # -- unlike _active_terms()/_matchable_slots(), which do set-based
+        # coverage; a contiguous-phrase check needs the real word order).
+        # Same tokenizer as the rest of the file.
+        phrases: list[str] = []
+        for value in state.active_slots.values():
+            terms = _terms(value)
+            if len(terms) >= 2:
+                phrases.append(" ".join(terms))
+        return phrases
+
     def _next_ask_attribute(self, state: SessionState) -> str | None:
         for attr in ASK_ORDER:
             if attr in state.active_slots:
@@ -417,8 +430,50 @@ class Agent:
                     )
                     return satisfied / len(matchable_slots)
 
+                # FIX-05: exact active multi-token slot phrase coverage --
+                # tertiary tie-break, used only to separate candidates
+                # already equal on BOTH term coverage and slot coverage
+                # (both remain untouched as the primary/secondary keys --
+                # this can never promote a candidate with lower coverage on
+                # either). One additional batched (non-FTS) row fetch --
+                # not per-phrase, not per-candidate -- reads the same
+                # title/features/details/description text already indexed
+                # for FTS, via the identical _text() flattening already
+                # baked into those columns at index time. A phrase is
+                # "satisfied" for a candidate if its complete normalized
+                # token sequence occurs contiguously in that combined text;
+                # score is satisfied/matchable multi-token phrases, no
+                # weights, no threshold. With zero matchable phrases this is
+                # 0.0 for every candidate -- a no-op that falls through to
+                # the unchanged baseline-BM25-order final tiebreak,
+                # identical to FIX-04A.
+                matchable_phrases = self._matchable_phrases(state)
+
+                candidate_field_text: dict[str, str] = {}
+                if matchable_phrases:
+                    field_rows = self.connection.execute(
+                        f"SELECT parent_asin, title, features, details, description "
+                        f"FROM products WHERE parent_asin IN ({placeholders})",
+                        candidate_asins,
+                    ).fetchall()
+                    candidate_field_text = {
+                        str(row[0]): " ".join(
+                            " ".join(_terms(field_value)) for field_value in row[1:]
+                        )
+                        for row in field_rows
+                    }
+
+                def _phrase_coverage(asin: str) -> float:
+                    if not matchable_phrases:
+                        return 0.0
+                    text = candidate_field_text.get(asin, "")
+                    satisfied = sum(1 for phrase in matchable_phrases if phrase in text)
+                    return satisfied / len(matchable_phrases)
+
                 candidate_asins.sort(
-                    key=lambda asin: (-_coverage(asin), -_slot_coverage(asin), baseline_index[asin])
+                    key=lambda asin: (
+                        -_coverage(asin), -_slot_coverage(asin), -_phrase_coverage(asin), baseline_index[asin]
+                    )
                 )
 
             recommendations = [{"parent_asin": asin} for asin in candidate_asins[:top_k]]
