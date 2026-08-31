@@ -1,208 +1,552 @@
-# TechJam Conversational E-Commerce Search Challenge — Team Submission
+# TechJam 2026 Track 4 — Conversational Shopping Copilot
 
-Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
+> A lightweight, stateful conversational search agent that separates **what the shopper wants now** from **what the conversation has taught the retrieval system**.
 
-This repository is the organizer's starter kit plus our team's completed submission: a fully deterministic, dependency-free conversational shopping agent implemented in `starter/agent.py`. It scores **88.0% HR@10** (176/200 public sessions) — see [Final Performance](#final-performance) below.
+## Overview
 
-## What You Receive
+This repository contains our submission for **TikTok TechJam 2026 — Track 4: Conversational E-Commerce Search**.
 
-- A frozen catalog of 50,000 products from the `Clothing_Shoes_and_Jewelry` category of Amazon Reviews 2023.
-- 200 labeled public sessions for local development.
-- A weak BM25 starter agent (`starter/agent_baseline.py`) and deterministic local evaluator.
-- The Agent API contract and scoring rules.
+The task is to build a multi-turn shopping agent that receives an anonymized user profile and a sequence of customer messages, asks useful clarification questions, and recommends the customer's hidden target product from a frozen catalog of 50,000 products within at most 10 turns.
 
-The organizer keeps 800 additional sessions private for final evaluation.
+Our final system is deliberately lightweight and fully deterministic. It uses **Python + SQLite FTS5 + BM25-style lexical retrieval**, combined with conversational state and hierarchical reranking. The scoring path uses **no external LLM, no model API, no network call, and no paid inference**.
 
-## What This Agent Does
+### Final public-set result
 
-The agent holds a multi-turn conversation with a simulated shopper, asking one clarification question per turn (material, color, size, style, use case, budget, brand, or a free-form "feature"), and returns an updated ranked list of catalog products after every message. It never calls an external model — everything is deterministic keyword retrieval (SQLite FTS5 + BM25) reordered by how well each candidate matches what the customer has actually disclosed.
-
-### The central insight: two different kinds of memory
-
-The agent tracks the conversation in two separate structures, and keeping them separate is what most of our engineering work was about:
-
-- **`active_slots` — what the customer currently wants.** This drives which question to ask next and which candidates get promoted, and it is updated *destructively*: if the customer says "actually, ignore my earlier preference, I need X instead," the old preference is genuinely superseded here.
-- **`slots` — everything usable the customer has disclosed, ever.** This feeds the search query. A preference that gets superseded in `active_slots` (no longer the customer's current *intent*) may still be true and still be useful *retrieval evidence* — a customer who first said "cotton" and then pivoted to "cheap" hasn't necessarily stopped wanting cotton, so that evidence is preserved here rather than being silently overwritten.
-
-Conflating these two was the single largest source of lost hits early in development (see `markdowns/fix01_intent_override_handover.md` onward) — an override message would correctly update what the agent asks about next, but would also destructively overwrite retrieval evidence the customer never actually contradicted.
-
-## Architecture
-
-```text
-Conversation turn
-  → template-aware message parsing (opener / clarification answer / override / "no preference")
-  → conversation state (active_slots + slots, kept separate — see above)
-  → SQLite FTS5 keyword retrieval → BM25 Top-50 candidate pool
-  → re-rank the Top-50 pool, in strict priority order:
-      1. active-term coverage       (does the candidate match the customer's CURRENT intent?)
-      2. active-slot coverage       (does it match at least one term from EVERY active slot, not just the loudest one?)
-      3. exact phrase coherence     (do multi-word disclosures like "95% Polyester, 5% Spandex"
-                                      appear as an exact contiguous phrase, not just as scattered words?)
-      4. original BM25 order        (final tie-break when everything above is identical)
-  → Top-10 recommendations + next clarification question
-```
-
-Each tier only ever reorders candidates that are *already tied* on every tier above it — a later tier can never promote a candidate that scores worse on an earlier one. This ordering was built and verified incrementally; each tier's own simulation/implementation report lives under `markdowns/` (`fix01b2_*` for term coverage, `fix02a2_*` for slot coverage, `fix05p0_*`/`fix05_*` for phrase coherence).
-
-## Final Performance
-
-Measured with the organizer's own unmodified `evaluator/local_evaluator.py` against the 200 public sessions:
-
-| Metric | Value |
-|---|---|
-| **HR@10** | **88.0%** (176 / 200 sessions) |
+| Metric | Final result |
+|---|---:|
+| **HR@10** | **88.0% (176 / 200 sessions)** |
 | MRR | 0.567583 |
 | MTTC | 5.495 turns |
 | Efficiency | 0.550500 |
 | **TechnicalScore** | **0.720375** |
-| Tests | 54 / 54 passing |
+| Unit tests | **54 / 54 passing** |
 
-Scenario breakdown (public set: 80 Buying, 80 Browsing, 30 Intent Override, 10 Boundary):
+The 88.0% figure is **HR@10 on the organizer's 200-session public development set**, not generic real-world "accuracy" and not a claim about the held-out 800-session private set.
 
-| Scenario | HR@10 | MRR | MTTC |
-|---|---|---|---|
-| Boundary | 80.0% | 0.502778 | 6.60 |
-| Browsing | 90.0% | 0.618204 | 5.30 |
-| Buying | 88.75% | 0.495288 | 5.50 |
-| Intent Override | 83.3% | 0.646984 | 5.63 |
+---
 
-**Baseline distinction** — two different numbers get called "baseline" in this project's history, and they should not be confused:
+## Why This Problem Matters
 
-- The organizer provides a deliberately weak reference agent (`starter/agent_baseline.py`, stateless BM25 with no conversation memory) scoring **12.5% HR@10** (`docs/baseline_results.json`) — this is the floor any real submission is expected to beat.
-- Our own first working multi-turn implementation (commit `500fe7b`, before any of the ranking-tier work described above) scored **73.0% HR@10**. That is *our own* early milestone, not an organizer-provided number. The engineering documented under `markdowns/` moved that 73.0% to the 88.0% reported above.
+Product search becomes harder when the user does not express a complete query in one message.
 
-Full session-by-session verification, including exact commit SHAs and simulation-vs-production equivalence checks for every tier, is in `markdowns/fix05_implementation_handover.md` and `markdowns/fix05_commit_push_report.md`.
+A shopper may start vague, reveal constraints gradually, change their mind, contradict an earlier preference, or care about several attributes at once. A useful conversational search system therefore needs to do more than retrieve products from the latest message: it must maintain state, distinguish current intent from historical context, ask productive follow-up questions, and rank products using all relevant information accumulated over the conversation.
 
-## Task
+Our main engineering insight came from precisely this problem.
 
-For each session, your agent receives an anonymized preference profile and a short customer message. Raw user IDs, review text, timestamps, and purchase history are never disclosed. On every turn the agent may:
+---
 
-- ask a natural clarification question in `message` and identify one requested field in `ask_attribute`;
-- return a ranked list of up to 10 catalog `parent_asin` values;
-- do both in the same response.
+## Core Insight — Two Different Kinds of Memory
 
-The session ends when the target product appears in the scored Top 10 or after turn 10. Sessions cover Buying, Browsing, Intent Override, and Boundary behavior.
+Early in development, one state structure was effectively serving two roles:
 
-## Download the Catalog
+1. **What does the customer currently want?**
+2. **What lexical evidence from the conversation is still useful for retrieval?**
 
-Download `catalog.jsonl.gz` from the GitHub Release attached to this repository, then run:
+Those are not always identical.
+
+We therefore separate them conceptually:
+
+### `active_slots` — current conversational truth
+
+`active_slots` represents the user's **currently active constraints**. It is used for:
+
+- current intent;
+- clarification logic;
+- active-term coverage;
+- active-slot coverage;
+- exact-phrase matching.
+
+When a user explicitly overrides a preference, this state must reflect the new intent.
+
+### `slots` — accumulated lexical retrieval evidence
+
+`slots` preserves the conversational evidence used to construct the lexical search query.
+
+This allows the agent to update current intent without unnecessarily destroying useful retrieval evidence that may still help distinguish the correct product.
+
+The separation emerged from measured failure analysis: an earlier attempt to make state semantically cleaner by simply deleting superseded evidence fixed the state representation but reduced benchmark performance. The final design therefore treats **conversation semantics** and **retrieval memory** as related but distinct responsibilities.
+
+---
+
+## How the Agent Works
+
+```text
+Customer message
+      ↓
+Template-aware parsing
+      ↓
+Conversation state
+(active_slots + retrieval evidence)
+      ↓
+SQLite FTS5 lexical retrieval
+      ↓
+BM25 Top-50 candidate pool
+      ↓
+Hierarchical reranking
+      │
+      ├─ 1. Active-term coverage
+      ├─ 2. Active-slot coverage
+      ├─ 3. Exact multi-token phrase coherence
+      └─ 4. Original BM25 order
+      ↓
+Top-10 recommendations
+      +
+next clarification question
+```
+
+The ranking hierarchy is strict: a later tier only breaks ties among candidates that are equal on all higher-priority tiers.
+
+### Tier 1 — Active-term coverage
+
+Measures how completely a candidate matches the distinct terms in the shopper's **current active intent**.
+
+This addresses a key observation from the original 73% working milestone: many misses were already inside the BM25 candidate pool, so the dominant opportunity was often **second-stage discrimination**, not simply retrieving more products.
+
+### Tier 2 — Active-slot coverage
+
+Term count alone can over-reward one verbose constraint.
+
+Slot coverage instead asks whether a candidate matches at least one usable term from each active constraint category, giving the ranker more awareness of the structure of the user's request.
+
+### Tier 3 — Exact phrase coherence
+
+Term and slot coverage can both saturate.
+
+For example, two candidates may contain every word in:
+
+> "shaft measures approximately 1 inch from arch"
+
+but one contains the complete sequence while the other has the same words scattered throughout its metadata.
+
+The phrase-coherence tier preserves that contiguous structure across `title`, `features`, `details`, and `description`.
+
+### Tier 4 — Original BM25 order
+
+When all three constraint-aware signals are tied, the original BM25 ranking remains the final deterministic tie-break.
+
+---
+
+## Conversation Behaviour
+
+On each turn the agent can both recommend products and ask one follow-up question.
+
+Supported clarification areas include:
+
+- category;
+- material;
+- color;
+- size;
+- style;
+- brand;
+- budget;
+- feature;
+- use case.
+
+The parser also handles common conversational forms such as:
+
+- initial shopping requests;
+- clarification answers;
+- explicit intent overrides;
+- "no preference" responses;
+- filler or vague replies;
+- free-form fallback input for the live demo.
+
+The interactive demo uses the same agent as the evaluator; it is simply an **unscored human-facing interface**.
+
+---
+
+## Performance
+
+Measured using the organizer's **unmodified** `evaluator/local_evaluator.py` on all 200 public sessions:
+
+| Scenario | Sessions | HR@10 | MRR | MTTC |
+|---|---:|---:|---:|---:|
+| Browsing | 80 | 90.0% | 0.618204 | 5.30 |
+| Buying | 80 | 88.75% | 0.495288 | 5.50 |
+| Intent Override | 30 | 83.3% | 0.646984 | 5.63 |
+| Boundary | 10 | 80.0% | 0.502778 | 6.60 |
+
+### Baselines — important distinction
+
+Three different milestones appear in the project history and should not be conflated:
+
+- **12.5% HR@10** — the organizer's deliberately weak stateless BM25 reference agent in `starter/agent_baseline.py`.
+- **73.0% HR@10** — our team's first accepted working multi-turn milestone before the final ranking improvements.
+- **88.0% HR@10** — the final verified public-set result.
+
+The documented final optimization cycle progressed:
+
+```text
+73.0%
+→ 80.5%
+→ 81.0%
+→ 82.5%
+→ 83.0%
+→ 88.0%
+```
+
+Detailed experiment, simulation, regression, and commit reports are preserved under `markdowns/`.
+
+---
+
+## Evidence-Driven Engineering
+
+We did not accept an idea because it sounded more sophisticated.
+
+The project used an evidence-controlled workflow:
+
+```text
+hypothesis
+→ simulation / targeted analysis
+→ implementation
+→ tests
+→ full evaluator
+→ session-level delta analysis
+→ review
+→ commit only after acceptance
+```
+
+Several ideas were rejected when measured results did not support them.
+
+Examples include:
+
+- deleting stale conversational evidence too aggressively;
+- broad active-only BM25 reranking;
+- a lightweight TF-IDF semantic-style retrieval experiment;
+- simply widening or changing ranking behaviour without evidence of a generalizable failure mode.
+
+The final scoring sprint intentionally ended with **"no safe experiment found"** rather than forcing another public-set optimization after the residual analysis stopped revealing a defensible new signal.
+
+This process is documented in `markdowns/`.
+
+---
+
+## Technical Execution and Reproducibility
+
+### Requirements
+
+- Python 3.10+ recommended
+- No third-party Python packages required
+- SQLite with FTS5 support
+- Local competition catalog at `data/catalog.jsonl`
+
+### Download the catalog
+
+Download `catalog.jsonl.gz` from the repository release, then:
 
 ```bash
 gzip -dk catalog.jsonl.gz
 mv catalog.jsonl data/catalog.jsonl
 ```
 
-Verify the downloaded file using the published `SHA256SUMS` file.
+Verify it using the published `SHA256SUMS`.
 
-## Quick Start
-
-Python 3.10 or later is recommended. The agent uses only the Python standard library — no `pip install` step is required.
+### Run the test suite
 
 ```bash
-# 1. Run the unit test suite (54 tests covering every ranking tier)
 python3 -m unittest discover -s tests -p 'test*.py'
+```
 
-# 2. Run the official 200-session evaluator against our agent
+Expected final result:
+
+```text
+54 tests
+54 PASS
+0 failures
+0 errors
+```
+
+### Reproduce the public evaluation
+
+```bash
 python3 -m evaluator.local_evaluator
-# writes per-session results and aggregate metrics to results.json,
-# and prints the summary (matches the "Final Performance" table above)
+```
 
-# 3. Try the agent yourself in a live, free-form conversation
+Expected aggregate result on the released 200-session public set:
+
+```text
+HR@10          0.880000
+MRR            0.567583
+MTTC           5.495000
+Efficiency     0.550500
+TechnicalScore 0.720375
+```
+
+The evaluator writes session-level and aggregate results to `results.json`.
+
+Do not modify `evaluator/local_evaluator.py` or `data/public_set.jsonl` when reproducing these results.
+
+### Run the live demo
+
+```bash
 python3 -m demo.interactive
 ```
 
-The **evaluator** (`evaluator/local_evaluator.py`) is what actually measures HR@10/MRR/MTTC/TechnicalScore — it drives our agent through a scripted fake customer built from the 200 labeled public sessions. The **interactive demo** (`demo/interactive.py`) is a separate, unscored tool: it lets a real person type free-form messages to the same agent and see it respond live, so a judge can get a feel for the conversation without needing the labeled session data. It does not calculate accuracy.
+The live demo lets a human enter free-form shopping requests and interact with the same agent used by the evaluator.
 
-Do not edit `evaluator/local_evaluator.py` or `data/public_set.jsonl` when reproducing our reported score — the evaluator, its labels, and the catalog are the organizer's frozen artifacts; only `starter/agent.py` is our submission.
+It does **not** calculate HR@10 because a free-form human interaction has no benchmark target label.
 
-For comparison, the organizer's own included weak BM25 starter (`starter/agent_baseline.py`) scores Hit Rate@10 `0.125`, MRR `0.068034`, and MTTC `9.81` on the released public set — see `docs/baseline_results.json`.
+### Fresh-clone verification
+
+The final committed repository was also reproduced from a fresh local clone:
+
+- 54 / 54 tests passed;
+- agent import and FTS index construction succeeded;
+- interactive demo imported successfully;
+- the full 200-session evaluator reproduced the final metrics above.
+
+---
 
 ## Agent Interface
+
+The submission implements the organizer's required API:
 
 ```python
 class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         ...
 
-    def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
+    def respond(
+        self,
+        session_id: str,
+        user_message: str,
+        turn: int,
+        top_k: int,
+    ) -> dict:
         return {
             "message": "Do you have a material preference?",
             "ask_attribute": "material",
             "recommendations": [
                 {"parent_asin": "B000..."},
-                {"parent_asin": "B001..."}
+                {"parent_asin": "B001..."},
             ],
-            "usage": {"prompt_tokens": 120, "completion_tokens": 30}
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            },
         }
 ```
 
-`ask_attribute` is one of `category`, `material`, `color`, `size`, `style`, `brand`, `budget`, `feature`, `use_case`, `other`, or `null`. See `docs/agent_api_contract.json`.
+See `docs/agent_api_contract.json` for the complete machine-readable contract.
 
-## Technical Metrics
+---
 
-- **Hit Rate@10:** fraction of sessions that find the target within 10 turns.
-- **MRR:** mean reciprocal rank of the target; a miss contributes zero.
-- **MTTC:** mean first-hit turn; a miss is assigned turn 11.
-- **Reported token usage:** prompt and completion tokens returned by the team's model client.
+## Model Choice, Dependencies and Cost
 
-```text
-TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
-Efficiency = clip((11 - MTTC) / 10, 0, 1)
-```
+The scoring agent intentionally does **not** use an external LLM or model API.
 
-Only exact `parent_asin` equality produces a hit. Core metrics are also reported by scenario.
+| Item | Submission |
+|---|---|
+| External inference model/API | None |
+| External API calls during scoring | 0 |
+| LLM prompt tokens during scoring | 0 |
+| LLM completion tokens during scoring | 0 |
+| Estimated API inference cost | **$0** |
+| Network access required for scoring | No |
+| Third-party Python dependencies | None |
 
-## Model Choice and Cost
+The runtime path uses Python standard-library components including `sqlite3`, `re`, `json`, `pathlib`, and related utilities.
 
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer does not provide or reimburse model API credits; teams are responsible for any costs incurred through optional external services.
+This design was chosen for reproducibility and operational simplicity. It should not be read as a claim that lexical retrieval is universally superior to neural or hybrid search; it is the architecture that survived our measured experiments under this benchmark and time constraint.
 
-**Our team's disclosure** (verified directly against the code, not assumed):
-
-- **Model / API used for scoring:** none. `starter/agent.py` and `evaluator/local_evaluator.py` import only Python standard-library modules (`json`, `re`, `sqlite3`, `pathlib`, `argparse`, `random`, `statistics`, `uuid`, `collections`) — no `requests`, no LLM SDK, no network call of any kind anywhere on the scoring path. `usage.prompt_tokens`/`usage.completion_tokens` are always reported as `0`.
-- **Network access required for scoring:** none. The agent builds its own in-memory SQLite FTS5 index from the local catalog file at startup and never makes an outbound request.
-- **External inference API calls:** 0.
-- **LLM tokens used during scoring:** 0.
-- **Estimated API inference cost:** $0.
-- **Dependency manifest:** none needed — no `requirements.txt`/`pyproject.toml` is required to run this submission.
+---
 
 ## Runtime
 
-Measured on the development machine used for final verification: the full 200-session evaluator run (`python3 -m evaluator.local_evaluator`) takes approximately **85–87 seconds**. This is not a universal latency figure — it will vary with the judging machine's hardware. It is slower than the immediately-prior ranking tier (roughly 53 seconds) because of one additional per-turn database lookup added for the exact-phrase-coherence tier (see `markdowns/fix05_implementation_handover.md` §9); the suspected cause (an index gap on a lookup column) is documented but was **not confirmed with a profiler** and should be read as a hypothesis, not a proven root cause.
-
-## Limitations
-
-- **Public HR@10 (88.0%) does not guarantee equivalent performance on the organizer's 800 private sessions.** The public set is what every ranking tier described above was tuned and validated against; the private set may surface different failure patterns.
-- **The architecture is entirely lexical** (SQLite FTS5 + BM25 + coverage/phrase tie-breaks) — it has no semantic or embedding-based matching. A read-only audit found this to be an intentional, evidence-based choice (a TF-IDF/embedding experiment was tried and rejected early on for near-zero recall — `markdowns/fix03_final_major_opportunity_audit.md`), not an oversight.
-- **The exact-phrase-coherence tier is closely aligned with how this benchmark's own conversational constraints are generated** — the simulated customer's disclosed text is drawn directly from the target product's own catalog fields (`evaluator/local_evaluator.py`'s `intent_card()`), so a phrase match against the target is expected more often than it would be against organically-written customer language. This is disclosed explicitly in `markdowns/fix04a_implementation_handover.md` and `markdowns/fix05p0_exact_phrase_tiebreak_simulation.md` as a real caveat on how well this specific signal should be expected to generalize.
-- **Runtime increased under the final ranking tier** (see Runtime above) — a genuine, disclosed trade-off accepted in exchange for the accuracy gain, not silently absorbed.
-- A final internal audit (`markdowns/final_score_sprint_report.md`) explicitly searched for further improvements before submission and concluded none could be justified without risking these caveats getting worse — see that report for the full evidence trail.
-
-## Files
+On the development machine used for final verification, the complete 200-session public evaluator took approximately:
 
 ```text
-data/public_set.jsonl             200 labeled development sessions
-docs/competition_specification.md participant rules and evaluation protocol
-docs/agent_api_contract.json      machine-readable Agent contract
-docs/evaluation_config.json       scoring configuration
-docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  our team's submission (final ranking mechanism described above)
-starter/agent_baseline.py         organizer's original weak BM25 reference agent (12.5% HR@10), kept for comparison
-evaluator/local_evaluator.py      public-set simulator and scorer (organizer's, unmodified)
-demo/interactive.py               unscored live demo -- see Quick Start
-tests/                            54 unit tests covering every ranking tier
-markdowns/                        full engineering history: every experiment, simulation, and
-                                   implementation report behind the final agent, in chronological order
+85–87 seconds
 ```
 
-## Judging and Submission Policy
+This is an environment-specific batch runtime, not a universal per-request latency measurement.
 
-- Participant submission requirements: `docs/submission_rules.md`
-- Participant release checklist: `docs/participant_release_checklist.md`
-- Organizer-only final judging controls: `organizer/JUDGING_RUNBOOK.md`
-- Organizer private release checklist: `organizer/private_release_checklist.md`
-- Judging day operations SOP: `organizer/JUDGING_DAY_SOP.md`
+The final phrase-coherence tier increased runtime relative to the immediately preceding build. An additional candidate-text database lookup is a plausible optimization target, but the exact root cause was **not profiler-confirmed**, so we do not present it as established fact.
+
+---
+
+## Limitations and Future Work
+
+### 1. Public-set generalization
+
+The reported 88.0% HR@10 is measured on the released 200-session public set.
+
+The organizer's 800-session private set may contain different failure patterns, so we do not claim equivalent private-set performance.
+
+### 2. Primarily lexical architecture
+
+The final system uses lexical matching rather than embeddings or a neural semantic retriever.
+
+A lightweight TF-IDF semantic-style experiment did not improve the relevant miss population enough to justify integration, but this does **not** establish that stronger neural retrieval would fail.
+
+**Future work:** evaluate genuine dense/hybrid retrieval against a separate validation set while preserving the current state architecture.
+
+### 3. Residual candidate-generation depth
+
+The final audit found that most remaining public misses were outside the internal Top-50 candidate pool.
+
+Simply widening the pool had previously shown poor risk/reward, so we did not alter the frozen submission without a better candidate-generation mechanism.
+
+**Future work:** investigate stronger first-stage retrieval rather than merely increasing candidate depth.
+
+### 4. Phrase-coherence benchmark alignment
+
+The evaluator constructs some conversational constraints from the target product's catalog fields.
+
+Exact phrase matching is therefore particularly compatible with this benchmark's generation process and may be less powerful on organically written customer requests.
+
+**Future work:** evaluate phrase and semantic signals on naturally authored shopping conversations.
+
+### 5. Clarification policy
+
+The agent uses a largely fixed attribute priority order rather than a learned information-gain policy.
+
+**Future work:** dynamically choose the next question based on expected reduction in candidate uncertainty.
+
+### 6. Runtime
+
+The phrase-coherence tier improves ranking quality but increases batch evaluation runtime.
+
+**Future work:** cache normalized candidate text or redesign the lookup path, subject to exact output-equivalence testing.
+
+---
+
+## Impact and Practicality
+
+The core problem extends beyond this benchmark: real shoppers rarely express a perfect product query once.
+
+A practical conversational search system needs to distinguish:
+
+> **What does the shopper want now?**
+
+from:
+
+> **What information from the conversation remains useful for retrieval?**
+
+That distinction supports changing preferences without discarding useful context and can be applied to other constraint-heavy catalog search and guided-shopping systems.
+
+The current implementation is also operationally simple:
+
+- deterministic execution;
+- no external service dependency;
+- no API credentials;
+- zero inference cost;
+- reproducible local evaluation;
+- lightweight deployment requirements.
+
+We present these as feasibility advantages, not as evidence of production-scale performance.
+
+---
+
+## Team Contributions
+
+The project was developed collaboratively, with responsibilities changing between the initial working system and the final optimization/submission phase.
+
+### Teammate — initial agent foundation, conversational robustness and demo
+
+Based on the project handover, the teammate's main contributions were:
+
+- built and tested the initial working multi-turn shopping agent that established the team's early **73.0% HR@10** milestone;
+- implemented the foundational dialog-memory behaviour and proactive clarification flow;
+- developed template-aware parsing and fallback handling for free-form or vague user responses;
+- built the interactive live demo in `demo/interactive.py`;
+- contributed later parsing/demo robustness improvements, including broader budget/style/no-preference/filler handling and safer fallback state updates;
+- performed early evaluator experiments and documented the initial technical handover for the remainder of the project.
+
+### Sam — evaluation strategy, final optimization direction, governance and submission
+
+Sam's primary role in the final development cycle was project control, evaluation strategy and technical decision-making rather than claiming every repository edit as personally authored code.
+
+Contributions included:
+
+- reproduced key evaluator baselines and benchmark states locally;
+- established the evidence-first experiment workflow and go/no-go criteria used for final optimization;
+- directed the root-cause investigation of remaining misses, intent-override failures and ranking saturation;
+- coordinated and approved the progression from the team's **73.0% HR@10** working milestone to the final **88.0% HR@10** implementation;
+- required session-level regression reporting, targeted tests, simulation-to-production equivalence and rollback-safe Git checkpoints before accepting scoring changes;
+- coordinated concurrent teammate changes, merge/reconciliation decisions and the final scoring freeze;
+- led the final no-overfitting audit, repository hardening, reproducibility verification and submission-readiness process;
+- owned the final technical narrative, metric/limitation disclosures and README/Devpost preparation.
+
+This division is intentionally stated conservatively: implementation and command execution performed through development tooling are not presented as personal human coding where the project record only supports direction, review or approval.
+
+---
+
+## Development Tooling
+
+Development used Git/GitHub and AI-assisted coding/review tooling during the engineering workflow.
+
+Those tools are **development aids only**. They are not runtime dependencies of the submitted agent.
+
+The frozen scoring implementation itself is deterministic and makes no external model or network calls.
+
+---
+
+## Repository Map
+
+```text
+starter/agent.py
+    Final team submission
+
+starter/agent_baseline.py
+    Organizer's weak BM25 reference implementation
+
+evaluator/local_evaluator.py
+    Organizer's unmodified public evaluator
+
+demo/interactive.py
+    Human-facing, unscored live demo
+
+tests/
+    54 unit tests
+
+data/public_set.jsonl
+    200 labeled public development sessions
+
+docs/
+    Competition specification, API contract and evaluation configuration
+
+markdowns/
+    Full experiment, simulation, verification and closeout history
+```
+
+---
 
 ## Data Source
 
-The catalog and sessions are derived from Amazon Reviews 2023 by McAuley Lab, UCSD. See `DATA_ATTRIBUTION.md` before using or redistributing the data.
-Sessions are sampled deterministically from the official Clothing 5-core leave-last-out split and joined to the frozen catalog.
+The catalog and sessions are derived from **Amazon Reviews 2023** by McAuley Lab, UCSD, using the organizer-provided frozen Track 4 assets.
+
+See `DATA_ATTRIBUTION.md` for the repository's data-attribution details.
+
+---
+
+## Submission Notes
+
+- Public repository: this repository
+- Scoring entry point: `starter/agent.py`
+- Public evaluator: `python3 -m evaluator.local_evaluator`
+- Interactive demo: `python3 -m demo.interactive`
+- Public YouTube demo: **add the final video link here before submission**
+- Full engineering evidence: `markdowns/`
+
+For participant requirements, see:
+
+- `docs/submission_rules.md`
+- `docs/participant_release_checklist.md`
+
+---
+
+## Final Status
+
+```text
+Public HR@10:       88.0% (176 / 200)
+MRR:                0.567583
+MTTC:               5.495
+TechnicalScore:     0.720375
+Tests:              54 / 54 PASS
+External API calls: 0
+LLM tokens:         0
+Inference cost:     $0
+```
+
+**Scoring implementation frozen for submission.**
