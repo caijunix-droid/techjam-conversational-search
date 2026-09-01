@@ -536,7 +536,7 @@ See `DATA_ATTRIBUTION.md` for the repository's data-attribution details.
 - Scoring entry point: `starter/agent.py`
 - Public evaluator: `python3 -m evaluator.local_evaluator`
 - Interactive demo: `python3 -m demo.interactive`
-- Public YouTube demo: **add the final video link here before submission**
+- Public YouTube demo: 'https://youtu.be/2QZEMJTRxHI'
 - Full engineering evidence: `markdowns/`
 
 For participant requirements, see:
